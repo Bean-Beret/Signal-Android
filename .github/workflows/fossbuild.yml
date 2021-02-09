@@ -26,5 +26,5 @@ jobs:
 
     - uses: actions/upload-artifact@v2
       with:
-        name: Upload APK
-        path: app/build/outputs/apk/playFossProd/release/*.apk
+        name: Release APK
+        path: app/build/outputs/apk/playFossProd/release/*universal*.apk
