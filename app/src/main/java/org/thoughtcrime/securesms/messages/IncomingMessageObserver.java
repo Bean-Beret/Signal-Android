@@ -2,6 +2,9 @@ package org.thoughtcrime.securesms.messages;
 
 import android.app.Application;
 import android.app.Service;
+import android.app.IntentService;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
@@ -38,6 +41,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class IncomingMessageObserver {
 
@@ -56,6 +60,8 @@ public class IncomingMessageObserver {
   private final List<Runnable>             decryptionDrainedListeners;
 
   private boolean appVisible;
+  private static AtomicBoolean connectionTrigger = new AtomicBoolean(true);
+  private static MessageRetrievalThread MsgRetThread;
 
   private volatile boolean networkDrained;
   private volatile boolean decryptionDrained;
@@ -70,11 +76,11 @@ public class IncomingMessageObserver {
     this.networkAccess              = ApplicationDependencies.getSignalServiceNetworkAccess();
     this.decryptionDrainedListeners = new CopyOnWriteArrayList<>();
 
-    new MessageRetrievalThread().start();
-
-    if (TextSecurePreferences.isFcmDisabled(context)) {
-      ContextCompat.startForegroundService(context, new Intent(context, ForegroundService.class));
-    }
+    MsgRetThread = new MessageRetrievalThread();
+    MsgRetThread.start();
+    PendingIntent wakeUpIntent = PendingIntent.getService(this.context, 0, MessagePollService.newIntent(this.context, this), 0);
+    AlarmManager alarmManager = (AlarmManager) context.getSystemService(context.ALARM_SERVICE);
+    alarmManager.setInexactRepeating(AlarmManager.RTC_WAKEUP, 0, 300000, wakeUpIntent);
 
     ApplicationDependencies.getAppForegroundObserver().addListener(new AppForegroundObserver.Listener() {
       @Override
@@ -102,6 +108,32 @@ public class IncomingMessageObserver {
         }
       }
     }, new IntentFilter(ConnectivityManager.CONNECTIVITY_ACTION));
+  }
+
+  public static class MessagePollService extends IntentService {
+    static IncomingMessageObserver myMsgObserver;
+    public MessagePollService() {
+      super("MessagePollService");
+    }
+
+    public static Intent newIntent(Context context, IncomingMessageObserver msgObserver) {
+       myMsgObserver = msgObserver;
+      return new Intent(context, MessagePollService.class);
+    }
+
+    @Override
+    protected void onHandleIntent(Intent intent) {
+      if (MsgRetThread.isAlive() && MsgRetThread != null) {
+        Log.i(TAG, "rerunning thread on intent");
+        synchronized (myMsgObserver) {
+          connectionTrigger.set(true);
+          myMsgObserver.notifyAll();
+        }
+      } else {
+        Log.i(TAG, "restarting thread on intent");
+        MsgRetThread.start();
+      }
+    }
   }
 
   public synchronized void addDecryptionDrainedListener(@NonNull Runnable listener) {
@@ -133,6 +165,7 @@ public class IncomingMessageObserver {
 
   private synchronized void onAppForegrounded() {
     appVisible = true;
+    connectionTrigger.set(true);
     notifyAll();
   }
 
@@ -156,6 +189,16 @@ public class IncomingMessageObserver {
            (appVisible || isGcmDisabled) &&
            hasNetwork                    &&
            !networkAccess.isCensored(context);
+  }
+
+  private synchronized void waitForConnectionTrigger() {
+    try {
+      while (!connectionTrigger.get()) {
+        wait();
+      }
+    } catch (InterruptedException e) {
+      throw new AssertionError(e);
+    }
   }
 
   private synchronized void waitForConnectionNecessary() {
@@ -219,6 +262,9 @@ public class IncomingMessageObserver {
     @Override
     public void run() {
       while (!terminated) {
+        waitForConnectionTrigger();
+        Log.i(TAG, "Connection Trigger received!");
+        connectionTrigger.set(false);
         Log.i(TAG, "Waiting for websocket state change....");
         waitForConnectionNecessary();
 
@@ -232,13 +278,16 @@ public class IncomingMessageObserver {
         SignalServiceMessagePipe unidentifiedLocalPipe = unidentifiedPipe;
 
         try {
-          while (isConnectionNecessary()) {
+          AtomicBoolean doAgain = new AtomicBoolean(true);
+          while (isConnectionNecessary() && (appVisible || doAgain.get())) {
             try {
+              doAgain.set(false);
               Log.d(TAG, "Reading message...");
               Optional<SignalServiceEnvelope> result = localPipe.readOrEmpty(REQUEST_TIMEOUT_MINUTES, TimeUnit.MINUTES, envelope -> {
                 Log.i(TAG, "Retrieved envelope! " + envelope.getTimestamp());
                 try (Processor processor = ApplicationDependencies.getIncomingMessageProcessor().acquire()) {
                   processor.processEnvelope(envelope);
+                  doAgain.set(true);
                 }
               });
 
