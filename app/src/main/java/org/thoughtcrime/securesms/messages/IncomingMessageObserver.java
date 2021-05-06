@@ -80,7 +80,7 @@ public class IncomingMessageObserver {
     MsgRetThread.start();
     PendingIntent wakeUpIntent = PendingIntent.getService(this.context, 0, MessagePollService.newIntent(this.context, this), 0);
     AlarmManager alarmManager = (AlarmManager) context.getSystemService(context.ALARM_SERVICE);
-    alarmManager.setInexactRepeating(AlarmManager.RTC_WAKEUP, 0, 300000, wakeUpIntent);
+    alarmManager.setInexactRepeating(AlarmManager.RTC_WAKEUP, 0, 600000, wakeUpIntent);
 
     ApplicationDependencies.getAppForegroundObserver().addListener(new AppForegroundObserver.Listener() {
       @Override
